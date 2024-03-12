@@ -1,0 +1,106 @@
+Program.Sub.Preflight.Start
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+Function.Intrinsic.Control.Try
+
+'This project was created for Voestalpine Roll Forming Corporation by FEQ on 10/06/2017.
+'This will run off the GUI. When a user logged into a work order sequence attempts to submit piece count towards a sequence, this program checks to make sure enough material has been issued towards the work order. If not the process will be stopped and the user will not be able to proceed.
+'Should only run off hook 15880
+
+F.ODBC.Connection!conx.OpenConnection(V.Ambient.PDSN, V.Ambient.PUser, V.Ambient.PPass)
+
+F.Intrinsic.Control.If(V.Caller.Hook, =, "15880")
+	F.Intrinsic.Control.CallSub(CheckIssue)
+	
+F.Intrinsic.Control.Else
+	F.Intrinsic.Control.CallSub(Unload)
+	
+F.Intrinsic.Control.EndIf
+
+Function.Intrinsic.Control.Catch
+	Function.Intrinsic.String.Concat("Project: GCG_4749_MatlCheck.g2u",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	Function.Intrinsic.Control.CallSub(unload)
+Function.Intrinsic.Control.EndTry
+
+Program.Sub.Main.End
+
+Program.Sub.CheckIssue.Start
+
+F.Intrinsic.Control.SetErrorHandler("CheckIssue_Err")
+F.Intrinsic.Control.ClearErrors
+
+V.Local.sError.Declare(String)
+V.Local..BulkDeclareString(sQty, sscrapqty, sTemp, sJob, sSuffix, sSeq, sTotalQty, sRouter, sSql)
+
+'set variables
+V.Local.sQty.Set(V.Passed.000001)
+V.Local.sscrapqty.Set(V.Passed.000002)
+V.Local.sJob.Set(V.Passed.009990)
+V.Local.sSuffix.Set(V.Passed.009991)
+V.Local.sSeq.Set(V.Passed.000005)
+F.Intrinsic.String.LPad(V.Local.sSeq, "0", 6, V.Local.sSeq)
+'V.Local.sWC.Set(V.Passed.000010)
+'V.Local.sEmployee.Set(V.Passed.009994)
+'V.Local.sScrapRef.Set(V.Passed.SCRAP-REF)
+
+'We begin by trying to figure out how much total material needs to have been issued, First grab what has already been completed for that sequence
+F.Intrinsic.String.Build("Select Units_Complete, Units_Scrap from V_JOB_OPERATIONS where JOB = '{0}' and Suffix = '{1}' and Seq = '{2}'", V.Local.sJob, V.Local.sSuffix, V.Local.sSeq, V.Local.sSql)
+F.ODBC.Connection!conx.ExecuteAndReturn(V.Local.sSql, V.Local.sTemp)
+F.Intrinsic.String.Split(V.Local.sTemp, "*!*", V.Local.sTemp)
+
+'sTotalQty will have all total quantity that we need to have material issued for
+F.Intrinsic.Math.Add(V.Local.sQty.Float, V.Local.sScrapQty.Float, V.Local.sTemp(0).Float, V.Local.sTemp(1).Float, V.Local.sTotalQty)
+
+'we look at the router to see how much material is needed to create one part
+F.Intrinsic.String.Build("Select TOP 1 ROUTER from V_JOB_HEADER where JOB = '{0}' and Suffix = '{1}'", V.Local.sJob, V.Local.sSuffix, V.Local.sSql)
+F.ODBC.Connection!conx.ExecuteAndReturn(V.Local.sSql, V.Local.sRouter)
+F.Intrinsic.String.Build("Select LINE_ROUTER, RUN_TIME from V_Router_Line where Router = '{0}' and LMO = 'M' and LINE_ROUTER < '{1}' order by LINE_ROUTER", V.Local.sRouter, V.Local.sSeq, V.Local.sSql)
+F.Data.DataTable.CreateFromSQL("MaterialTable", "conx", V.Local.sSql)
+
+F.Intrinsic.String.Build("[RUN_TIME]*{0}", V.Local.sTotalQty.Float, V.Local.sTemp)
+F.Data.DataTable.AddExpressionColumn("MaterialTable", "MaterialNeeded", "Float", V.Local.sTemp)
+
+'we need to look at the material sequences previous to the current labor sequence and total up the number of parts that will be needed.
+F.Intrinsic.String.Build("Select Seq, Hours_ACTUal from V_JOB_OPERATIONS where JOB = '{0}' and Suffix = '{1}' and Seq < '{2}' and LMO = 'M'", V.Local.sJOb, V.Local.sSuffix, V.Local.sSeq, V.Local.sSql)
+F.Data.Dictionary.CreateFromSQL("QtyIssuedDic", "conx", V.Local.sSql)
+F.Data.Dictionary.SetDefaultReturn("QtyIssuedDic", 0)
+
+F.Data.DataTable.AddColumn("MaterialTable", "QtyIssued", "Float")
+F.Data.DataTable.FillFromDictionary("MaterialTable", "QtyIssuedDic", "LINE_ROUTER", "QtyIssued")
+F.Data.Dictionary.Close("QtyIssuedDic")
+
+F.Data.DataTable.AddExpressionColumn("MaterialTable", "InNeed", "Float", "[MaterialNeeded] - [QtyIssued]")
+
+F.Data.DataView.Create("MaterialTable", "NeededView", 22, "[InNeed] > 0", "")
+
+F.Intrinsic.Control.If(V.DaTaView.MaterialTable!NeededView.RowCount, >, 0)
+	F.Data.DataView.ToString("MaterialTable", "NeededView", "LINE_ROUTER", " ", ", ", V.Local.sTemp)
+	F.Intrinsic.String.Build("Not enough material has been issued in sequences {0} to complete these parts!!!", V.Local.sTemp, V.Local.sSql)
+	F.Intrinsic.UI.MsgBox(V.Local.sSql, "!!!CRITICAL ERROR!!!")
+	V.Passed.777777.Set(1)
+	F.Intrinsic.Control.CallSub(Unload)
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.Label("CheckIssue_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: GCG_4749_MatlCheck.g2u",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	Function.Intrinsic.Control.CallSub(unload)
+Function.Intrinsic.Control.EndIf
+
+Program.Sub.CheckIssue.End
+
+Program.Sub.Unload.Start
+F.Intrinsic.Control.Try
+
+F.ODBC.Connection!conx.Close
+F.Intrinsic.Control.End
+
+Function.Intrinsic.Control.Catch
+	Function.Intrinsic.String.Concat("Project: GCG_4749_MatlCheck.g2u",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)	
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+Function.Intrinsic.Control.EndTry
+Program.Sub.Unload.End
